@@ -5,6 +5,8 @@ import type { Ack, JoinResult, Role } from "@/lib/types";
 import { readCookie, SESSION_COOKIE, verifySessionToken } from "./auth";
 import { prisma } from "./db";
 import { UserError, zodMessage } from "./errors";
+import { resolveClientIp } from "./network";
+import { enforce, hit, isLimited, TOO_FAST } from "./rateLimit";
 import {
   broadcastActivePoll,
   broadcastEvent,
@@ -40,12 +42,33 @@ import { controlQuiz } from "./services/quiz";
 
 interface SocketData {
   userId: string | null;
+  ip: string;
   eventId?: string;
   role?: Role;
   participantId?: string;
 }
 
 type AppSocket = Socket<Record<string, never>, Record<string, never>, Record<string, never>, SocketData>;
+
+const MINUTE = 60_000;
+
+/** [per participant/socket, per IP] limits per minute. The IP limit is generous because offices share one address. */
+const EVENT_LIMITS: Record<string, [number, number]> = {
+  "qa:ask": [5, 100],
+  "qa:vote": [60, 3000],
+  "qa:edit": [10, 300],
+  "qa:delete": [10, 300],
+  "poll:respond": [30, 3000],
+  "participant:rename": [10, 300],
+  join: [20, 1000],
+};
+const DEFAULT_LIMIT: [number, number] = [120, 3000];
+
+// Participants created per IP per hour; high enough for a whole conference behind one NAT.
+const NEW_PARTICIPANTS_PER_IP = 500;
+// Unknown event codes tried per IP per 10 minutes. Slows code guessing to a crawl while leaving
+// room for typos from many attendees sharing one office IP.
+const BAD_CODES_PER_IP = 100;
 
 const joinSchema = z.object({
   code: z.string().trim(),
@@ -57,6 +80,7 @@ export function registerSocketHandlers(io: Server) {
   setIO(io);
 
   io.use(async (socket, next) => {
+    socket.data.ip = resolveClientIp(socket.handshake.address, socket.handshake.headers["x-forwarded-for"]);
     const cookie = readCookie(socket.handshake.headers.cookie, SESSION_COOKIE);
     socket.data.userId = await verifySessionToken(cookie);
     next();
@@ -68,6 +92,9 @@ export function registerSocketHandlers(io: Server) {
     const handle = <T>(name: string, fn: (payload: unknown) => Promise<T>) => {
       socket.on(name, async (payload: unknown, ack?: (res: Ack<T>) => void) => {
         try {
+          const [perActor, perIp] = EVENT_LIMITS[name] ?? DEFAULT_LIMIT;
+          enforce(`sock:${name}:${socket.data.participantId ?? socket.id}`, perActor, MINUTE);
+          enforce(`ip:${name}:${socket.data.ip}`, perIp, MINUTE);
           const data = await fn(payload ?? {});
           ack?.({ ok: true, data });
         } catch (err) {
@@ -102,8 +129,13 @@ export function registerSocketHandlers(io: Server) {
       const parsed = joinSchema.safeParse(payload);
       if (!parsed.success) throw new UserError(zodMessage(parsed.error));
       const { code, role, token } = parsed.data;
+      const badCodeKey = `badcode:${socket.data.ip}`;
+      if (isLimited(badCodeKey, BAD_CODES_PER_IP, 10 * MINUTE)) throw new UserError(TOO_FAST);
       const event = await prisma.event.findUnique({ where: { code: code.replace(/^#/, "") } });
-      if (!event) throw new UserError("We couldn't find an event with that code");
+      if (!event) {
+        hit(badCodeKey, BAD_CODES_PER_IP, 10 * MINUTE);
+        throw new UserError("We couldn't find an event with that code");
+      }
       const isHost = role !== "participant";
       if (isHost && socket.data.userId !== event.ownerId) throw new UserError("You're not the host of this event");
 
@@ -128,6 +160,7 @@ export function registerSocketHandlers(io: Server) {
       if (role === "participant") {
         let participant = token ? await prisma.participant.findUnique({ where: { token } }) : null;
         if (!participant || participant.eventId !== event.id) {
+          enforce(`newparticipant:${socket.data.ip}`, NEW_PARTICIPANTS_PER_IP, 60 * MINUTE);
           participant = await prisma.participant.create({
             data: { eventId: event.id, token: randomBytes(24).toString("base64url") },
           });
@@ -176,6 +209,7 @@ export function registerSocketHandlers(io: Server) {
 
     handle("qa:vote", async (payload) => {
       const { event, participant } = await asParticipant();
+      if (event.archived) throw new UserError("This event has ended");
       const result = await toggleVote(event.id, participant.id, (payload as { questionId?: unknown }).questionId);
       broadcastQuestions(event.id);
       return result;

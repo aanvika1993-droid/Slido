@@ -320,6 +320,7 @@ export async function respond(eventId: string, participantId: string, input: unk
   });
   if (!question || question.poll.eventId !== eventId) throw new UserError("Poll not found");
   const { poll } = question;
+  if (poll.event.archived) throw new UserError("This event has ended");
   if (poll.event.activePollId !== poll.id) throw new UserError("This poll is no longer active");
   if (poll.votingLocked) throw new UserError("Voting is closed");
 

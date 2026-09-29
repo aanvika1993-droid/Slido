@@ -41,7 +41,7 @@ Try it: open `/admin/123456` as the host, `/event/123456` in another browser or 
 | --- | --- |
 | `npm run dev` | Dev server with Socket.IO (`tsx server.ts`) |
 | `npm run build` / `npm start` | Production build / server |
-| `npm test` | Vitest unit tests (results aggregation, quiz scoring, CSV) |
+| `npm test` | Vitest unit tests (results aggregation, quiz scoring, CSV, security helpers) |
 | `npm run lint` | ESLint |
 | `npm run db:migrate` / `npm run db:seed` | Prisma migrations / demo data |
 
@@ -66,4 +66,15 @@ Each event has three Socket.IO rooms: participants, admins and present. Every ch
 
 Participants are identified by a random token stored in `localStorage`, so they keep their votes and identity across reloads.
 
-> The server keeps Socket.IO state in one process. To run several instances, add the Socket.IO Redis adapter and move quiz timers to a shared scheduler.
+## Security
+
+- **Hosts:** bcrypt password hashes and an httpOnly `SameSite=lax` session cookie. Every host action checks that the user owns the event.
+- **Secret key:** in production the server refuses to start without a strong `AUTH_SECRET` (32+ random characters, not the placeholder).
+- **Rate limits:** logins (10 per email and 30 per IP per 15 min), signups, questions (5 per minute per participant), votes and responses, new participant identities per IP, and wrong event codes (100 per IP per 10 min).
+- **Real-time connections:** browsers from other sites are rejected (Origin check). Set `ALLOWED_ORIGINS` if the public URL differs from the host header.
+- **Headers:** Content-Security-Policy, `X-Frame-Options: DENY` (no clickjacking), `nosniff`, a referrer policy, and HSTS in production.
+- **CSV exports:** cells that spreadsheets would run as formulas (`=`, `+`, `-`, `@`) are neutralised.
+- **Participants:** anonymous, so one person can still vote again from a new browser (Slido has the same limit). The per-IP limits cap how far this goes. Use moderation for Q&A.
+- **Behind a reverse proxy:** set `TRUST_PROXY=true` so rate limits use the real client IP from `X-Forwarded-For`. Don't set it otherwise, because clients could then spoof their IP.
+
+> The server keeps Socket.IO state and rate-limit counters in one process. To run several instances, add the Socket.IO Redis adapter and move quiz timers and rate limits to Redis.

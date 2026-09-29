@@ -3,12 +3,25 @@ import { SignJWT, jwtVerify } from "jose";
 export const SESSION_COOKIE = "pulse_session";
 export const SESSION_MAX_AGE = 60 * 60 * 24 * 30;
 
-function secret() {
-  const value = process.env.AUTH_SECRET;
-  if (!value && process.env.NODE_ENV === "production") {
-    throw new Error("AUTH_SECRET must be set in production");
+const PLACEHOLDER_SECRET = "change-me-to-a-long-random-string";
+const MIN_SECRET_LENGTH = 32;
+
+export function isWeakSecret(value: string | undefined): boolean {
+  return !value || value.length < MIN_SECRET_LENGTH || value === PLACEHOLDER_SECRET;
+}
+
+/** Refuse to run in production with a missing, short or placeholder secret (it would let anyone forge host logins). */
+export function assertAuthSecret() {
+  if (isWeakSecret(process.env.AUTH_SECRET)) {
+    throw new Error(
+      `AUTH_SECRET must be a random string of at least ${MIN_SECRET_LENGTH} characters. Generate one with: openssl rand -hex 32`,
+    );
   }
-  return new TextEncoder().encode(value ?? "dev-only-secret-change-me");
+}
+
+function secret() {
+  if (process.env.NODE_ENV === "production") assertAuthSecret();
+  return new TextEncoder().encode(process.env.AUTH_SECRET || "dev-only-secret-change-me");
 }
 
 export async function createSessionToken(userId: string): Promise<string> {

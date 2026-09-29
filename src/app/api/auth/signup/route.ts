@@ -4,6 +4,8 @@ import { z } from "zod";
 import { prisma } from "@/server/db";
 import { UserError, zodMessage } from "@/server/errors";
 import { errorResponse, readJson, withSession } from "@/server/http";
+import { CLIENT_IP_HEADER } from "@/server/network";
+import { TOO_FAST, hit } from "@/server/rateLimit";
 
 const schema = z.object({
   name: z.string().trim().min(1, "Enter your name").max(80),
@@ -13,6 +15,9 @@ const schema = z.object({
 
 export async function POST(req: Request) {
   try {
+    if (!hit(`signup:${req.headers.get(CLIENT_IP_HEADER) ?? "unknown"}`, 10, 60 * 60_000)) {
+      return NextResponse.json({ error: TOO_FAST }, { status: 429 });
+    }
     const parsed = schema.safeParse(await readJson(req));
     if (!parsed.success) throw new UserError(zodMessage(parsed.error));
     const { name, email, password } = parsed.data;
