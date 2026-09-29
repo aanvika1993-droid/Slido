@@ -1,0 +1,140 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+// SQLite for local development. Switch provider to "postgresql" for production.
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String
+  passwordHash String
+  createdAt    DateTime @default(now())
+  events       Event[]
+}
+
+model Event {
+  id                    String        @id @default(cuid())
+  code                  String        @unique
+  name                  String
+  ownerId               String
+  owner                 User          @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  startsAt              DateTime      @default(now())
+  endsAt                DateTime?
+  archived              Boolean       @default(false)
+  qaEnabled             Boolean       @default(true)
+  qaModeration          Boolean       @default(false)
+  qaAnonymousAllowed    Boolean       @default(true)
+  qaPaused              Boolean       @default(false)
+  highlightedQuestionId String?
+  activePollId          String?
+  createdAt             DateTime      @default(now())
+  participants          Participant[]
+  questions             Question[]
+  polls                 Poll[]
+}
+
+model Participant {
+  id        String          @id @default(cuid())
+  // Secret held only by the participant's browser; the public id is shown to others.
+  token     String          @unique
+  eventId   String
+  event     Event           @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  name      String?
+  createdAt DateTime        @default(now())
+  questions Question[]
+  votes     QuestionVote[]
+  responses PollResponse[]
+}
+
+model Question {
+  id            String         @id @default(cuid())
+  eventId       String
+  event         Event          @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  participantId String
+  participant   Participant    @relation(fields: [participantId], references: [id], onDelete: Cascade)
+  authorName    String?
+  text          String
+  // PENDING | LIVE | ANSWERED | REJECTED
+  status        String         @default("LIVE")
+  starred       Boolean        @default(false)
+  createdAt     DateTime       @default(now())
+  votes         QuestionVote[]
+
+  @@index([eventId])
+}
+
+model QuestionVote {
+  questionId    String
+  question      Question    @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  participantId String
+  participant   Participant @relation(fields: [participantId], references: [id], onDelete: Cascade)
+  createdAt     DateTime    @default(now())
+
+  @@id([questionId, participantId])
+}
+
+model Poll {
+  id             String         @id @default(cuid())
+  eventId        String
+  event          Event          @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  title          String
+  // POLL (one or more questions, i.e. a survey) | QUIZ
+  kind           String         @default("POLL")
+  // DRAFT | ACTIVE | CLOSED
+  status         String         @default("DRAFT")
+  resultsVisible Boolean        @default(true)
+  votingLocked   Boolean        @default(false)
+  presentIndex   Int            @default(0)
+  // Quiz state: LOBBY | QUESTION | REVEAL | FINISHED
+  quizPhase      String         @default("LOBBY")
+  quizIndex      Int            @default(-1)
+  quizEndsAt     DateTime?
+  order          Int            @default(0)
+  createdAt      DateTime       @default(now())
+  questions      PollQuestion[]
+
+  @@index([eventId])
+}
+
+model PollQuestion {
+  id           String         @id @default(cuid())
+  pollId       String
+  poll         Poll           @relation(fields: [pollId], references: [id], onDelete: Cascade)
+  // MULTIPLE_CHOICE | WORD_CLOUD | RATING | OPEN_TEXT | RANKING | QUIZ
+  type         String
+  text         String
+  allowMultiple Boolean       @default(false)
+  ratingMax    Int            @default(5)
+  timeLimitSec Int            @default(20)
+  order        Int            @default(0)
+  options      PollOption[]
+  responses    PollResponse[]
+}
+
+model PollOption {
+  id             String       @id @default(cuid())
+  pollQuestionId String
+  pollQuestion   PollQuestion @relation(fields: [pollQuestionId], references: [id], onDelete: Cascade)
+  text           String
+  isCorrect      Boolean      @default(false)
+  order          Int          @default(0)
+}
+
+model PollResponse {
+  id             String       @id @default(cuid())
+  pollQuestionId String
+  pollQuestion   PollQuestion @relation(fields: [pollQuestionId], references: [id], onDelete: Cascade)
+  participantId  String
+  participant    Participant  @relation(fields: [participantId], references: [id], onDelete: Cascade)
+  // JSON-encoded ResponseValue (see src/lib/types.ts)
+  value          String
+  score          Int          @default(0)
+  answeredAt     DateTime     @default(now())
+
+  @@unique([pollQuestionId, participantId])
+}
